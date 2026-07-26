@@ -282,6 +282,23 @@ dt_tls_writer_destroy(void* obj)
 	return fstrm_res_success;
 }
 
+/* Release TLS connection resources; safe if already disconnected. */
+static void
+dt_tls_writer_disconnect(struct dt_tls_writer* dtw, int do_shutdown)
+{
+	if(dtw->ssl) {
+		if(do_shutdown)
+			SSL_shutdown(dtw->ssl);
+		SSL_free(dtw->ssl);
+		dtw->ssl = NULL;
+	}
+	if(dtw->fd != -1) {
+		close(dtw->fd);
+		dtw->fd = -1;
+	}
+	dtw->connected = 0;
+}
+
 /* The fstrm writer open callback for TLS */
 static fstrm_res
 dt_tls_writer_open(void* obj)
@@ -353,27 +370,26 @@ dt_tls_writer_open(void* obj)
 	}
 	if(connect(dtw->fd, (struct sockaddr*)&addr, addrlen) < 0) {
 		log_msg(LOG_ERR, "dnstap: connect failed: %s", strerror(errno));
-		return fstrm_res_failure;
+		goto fail;
 	}
-	dtw->connected = 1;
 
 	/* setup SSL */
 	dtw->ssl = SSL_new(dtw->ctx);
 	if(!dtw->ssl) {
 		log_msg(LOG_ERR, "dnstap: SSL_new failed");
-		return fstrm_res_failure;
+		goto fail;
 	}
 	SSL_set_connect_state(dtw->ssl);
 	(void)SSL_set_mode(dtw->ssl, SSL_MODE_AUTO_RETRY);
 	if(!SSL_set_fd(dtw->ssl, dtw->fd)) {
 		log_msg(LOG_ERR, "dnstap: SSL_set_fd failed");
-		return fstrm_res_failure;
+		goto fail;
 	}
 	if(dtw->tls_server_name && dtw->tls_server_name[0]) {
 		if(!SSL_set1_host(dtw->ssl, dtw->tls_server_name)) {
 			log_msg(LOG_ERR, "dnstap: TLS setting of hostname %s failed to %s",
 				dtw->tls_server_name, dtw->ip);
-			return fstrm_res_failure;
+			goto fail;
 		}
 	}
 
@@ -387,14 +403,14 @@ dt_tls_writer_open(void* obj)
 		if(r != SSL_ERROR_WANT_READ && r != SSL_ERROR_WANT_WRITE) {
 			if(r == SSL_ERROR_ZERO_RETURN) {
 				log_msg(LOG_ERR, "dnstap: EOF on SSL_do_handshake");
-				return fstrm_res_failure;
+				goto fail;
 			}
 			if(r == SSL_ERROR_SYSCALL) {
 				log_msg(LOG_ERR, "dnstap: SSL_do_handshake failed: %s", strerror(errno));
-				return fstrm_res_failure;
+				goto fail;
 			}
 			log_crypto_err("dnstap: SSL_do_handshake failed");
-			return fstrm_res_failure;
+			goto fail;
 		}
 		/* wants to be called again */
 	}
@@ -402,7 +418,7 @@ dt_tls_writer_open(void* obj)
 	/* check authenticity of server */
 	if(SSL_get_verify_result(dtw->ssl) != X509_V_OK) {
 		log_crypto_err("SSL verification failed");
-		return fstrm_res_failure;
+		goto fail;
 	}
 #ifdef HAVE_SSL_GET1_PEER_CERTIFICATE
 	x = SSL_get1_peer_certificate(dtw->ssl);
@@ -411,11 +427,17 @@ dt_tls_writer_open(void* obj)
 #endif
 	if(!x) {
 		log_crypto_err("Server presented no peer certificate");
-		return fstrm_res_failure;
+		goto fail;
 	}
 	X509_free(x);
 
+	dtw->connected = 1;
 	return fstrm_res_success;
+
+fail:
+	/* No successful handshake yet; do not SSL_shutdown. */
+	dt_tls_writer_disconnect(dtw, 0);
+	return fstrm_res_failure;
 }
 
 /* The fstrm writer close callback for TLS */
@@ -423,18 +445,13 @@ static fstrm_res
 dt_tls_writer_close(void* obj)
 {
 	struct dt_tls_writer* dtw = (struct dt_tls_writer*)obj;
-	if(dtw->connected) {
-		dtw->connected = 0;
-		if(dtw->ssl)
-			SSL_shutdown(dtw->ssl);
-		SSL_free(dtw->ssl);
-		dtw->ssl = NULL;
-		if(dtw->fd != -1) {
-			close(dtw->fd);
-			dtw->fd = -1;
-		}
+	int was_connected = dtw->connected;
+	int had_resources = (dtw->ssl != NULL || dtw->fd != -1);
+
+	dt_tls_writer_disconnect(dtw, was_connected);
+	/* Success if we closed a live connection or cleaned leftover FDs/SSL. */
+	if(was_connected || had_resources)
 		return fstrm_res_success;
-	}
 	return fstrm_res_failure;
 }
 

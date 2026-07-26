@@ -1293,6 +1293,10 @@ TCP is used. Default is yes.
 .B dnstap-tls-server-name:\fR <string>
 The name for authenticating the upstream server. With "" disabled.
 .TP
+.B dnstap-tls-cert-bundle:\fR <file name>
+The certificate bundle file (PEM) used to verify the authenticity of the
+upstream dnstap server when TLS is used. With "" disabled. Default is "".
+.TP
 .B dnstap-tls-client-key-file:\fR <file name>
 The key file for client authentication, or "" disabled.
 .TP
