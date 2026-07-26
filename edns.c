@@ -71,6 +71,7 @@ edns_init_record(edns_record_type *edns)
 	edns->dnssec_ok = 0;
 	edns->nsid = 0;
 	edns->zoneversion = 0;
+	edns->padding = 0;
 	edns->cookie_status = COOKIE_NOT_PRESENT;
 	edns->cookie_len = 0;
 	edns->ede = -1; /* -1 means no Extended DNS Error */
@@ -116,6 +117,11 @@ edns_handle_option(uint16_t optcode, uint16_t optlen, buffer_type* packet,
 		} else {
 			buffer_skip(packet, optlen);
 		}
+		break;
+	case PADDING_CODE:
+		if(query->tls)
+			edns->padding = 1;
+		buffer_skip(packet, optlen);
 		break;
 	case ZONEVERSION_CODE:
 		edns->zoneversion = 1;
@@ -257,11 +263,8 @@ void cookie_verify(query_type *q, struct nsd* nsd, uint32_t *now_p) {
 
 	q->edns.cookie_status = COOKIE_INVALID;
 
-	cookie_time = (q->edns.cookie[12] << 24)
-	            | (q->edns.cookie[13] << 16)
-	            | (q->edns.cookie[14] <<  8)
-	            |  q->edns.cookie[15];
-	
+	cookie_time = read_uint32(q->edns.cookie + 12);
+
 	now_uint32 = *now_p ? *now_p : (*now_p = (uint32_t)time(NULL));
 
 	if(compare_1982(now_uint32, cookie_time) > 0) {

@@ -7,7 +7,7 @@ sinclude(dnstap/dnstap.m4)
 
 # autoconf-2.70 is needed for @runstatedir@
 AC_PREREQ([2.70])
-AC_INIT([NSD],[4.14.3],[https://github.com/NLnetLabs/nsd/issues or nsd-bugs@nlnetlabs.nl])
+AC_INIT([NSD],[4.15.1],[https://github.com/NLnetLabs/nsd/issues or nsd-bugs@nlnetlabs.nl])
 AC_CONFIG_HEADERS([config.h])
 
 #
@@ -958,6 +958,16 @@ AC_ARG_WITH([tcp_timeout],
 	AS_HELP_STRING([--with-tcp-timeout=number],[Limit the default tcp timeout]),
 	[tcp_timeout=$withval])
 AC_DEFINE_UNQUOTED([TCP_TIMEOUT], $tcp_timeout, [Define to the default tcp timeout.])
+
+dnl
+dnl Determine the maximum CNAME chain length to return
+dnl Defaults to 18 as a tribute to our dear colleague
+dnl
+max_cname_chain=18
+AC_ARG_WITH([max_cname_chain],
+	AS_HELP_STRING([--with-max-cname-chain=number],[Limit the maximum number of CNAMEs to follow]),
+	[max_cname_chain=$withval])
+AC_DEFINE_UNQUOTED([MAX_CNAME_CHAIN], $max_cname_chain, [Define to the default maximum number of CNAMEs to follow.])
 
 dnl
 dnl Features

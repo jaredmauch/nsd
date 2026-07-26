@@ -497,6 +497,7 @@ answer_notify(struct nsd* nsd, struct query *query)
 	{
 		int s = nsd->serve2xfrd_fd_send[nsd->this_child->child_num];
 		uint16_t sz;
+		uint32_t sz32;
 		uint32_t acl_send = htonl(acl_num);
 		uint32_t acl_xfr;
 		size_t pos;
@@ -517,8 +518,11 @@ answer_notify(struct nsd* nsd, struct query *query)
 			return query_error(query, NSD_RC_SERVFAIL);
 		/* forward to xfrd for processing
 		   Note. Blocking IPC I/O, but acl is OK. */
-		sz = buffer_limit(query->packet)
+		sz32 = buffer_limit(query->packet)
 		   + sizeof(acl_send) + sizeof(acl_xfr);
+		if(sz32 > 0xFFFF)
+			return query_error(query, NSD_RC_SERVFAIL);
+		sz = (uint16_t)sz32;
 		sz = htons(sz);
 		if(!write_socket(s, &sz, sizeof(sz)) ||
 			!write_socket(s, buffer_begin(query->packet),
@@ -1138,6 +1142,9 @@ answer_domain(struct nsd* nsd, struct query *q, answer_type *answer,
 			zone_type* origzone = q->zone;
 			++q->cname_count;
 
+			if (q->cname_count >= MAX_CNAME_CHAIN) {
+				return;
+			}
 			answer_lookup_zone(nsd, q, answer, closest_match->number,
 					     closest_match == closest_encloser,
 					     closest_match, closest_encloser,
@@ -1232,6 +1239,10 @@ answer_authoritative(struct nsd   *nsd,
 			return;
 		}
 		DEBUG(DEBUG_QUERY,2, (LOG_INFO, "->result is %s", dname_to_string(newname, NULL)));
+		if (q->cname_count >= MAX_CNAME_CHAIN) {
+			return;
+		}
+
 		/* follow the DNAME */
 		(void)namedb_lookup(nsd->db, newname, &closest_match, &closest_encloser);
 		/* synthesize CNAME record */
@@ -1835,7 +1846,21 @@ query_add_optional(query_type *q, nsd_type *nsd, uint32_t *now_p)
 			                           +  sizeof(uint8_t)
 			                           +  sizeof(uint8_t)
 			                           +  sizeof(uint32_t);
-
+		if(q->edns.padding) {
+			size_t cur_sz = buffer_position(q->packet) + 2 + q->edns.opt_reserved_space;
+			size_t padded_sz = (((cur_sz - 1) / PADDING_BLOCK_SZ) + 1) * PADDING_BLOCK_SZ;
+			size_t to_padd = padded_sz - cur_sz;
+			/* Need 4 bytes for option code and length */
+			q->edns.padding = to_padd >= 4 ? to_padd
+			                : to_padd >  0 ? (PADDING_BLOCK_SZ + to_padd) 
+					: 0; /* Multiple of PADDING_BLOCK_SZ,
+			                      * so no outgoing padding option */
+			if(!buffer_available(q->packet, 2+q->edns.opt_reserved_space+q->edns.padding) || cur_sz + q->edns.padding > 65535)
+				q->edns.padding = 0;
+			if(q->edns.padding) {
+				q->edns.opt_reserved_space += q->edns.padding;
+			}
+		}
 		if(q->edns.opt_reserved_space == 0 || !buffer_available(
 			q->packet, 2+q->edns.opt_reserved_space)) {
 			/* fill with NULLs */
@@ -1890,6 +1915,12 @@ query_add_optional(query_type *q, nsd_type *nsd, uint32_t *now_p)
 					buffer_write(q->packet,
 							q->edns.ede_text,
 							q->edns.ede_text_len);
+			}
+			if(q->edns.padding) {
+				assert(q->edns.padding >= 4);
+				buffer_write_u16(q->packet, PADDING_CODE);
+				buffer_write_u16(q->packet, q->edns.padding - 4);
+				buffer_fill(q->packet, 0, q->edns.padding - 4);
 			}
 		}
 		ARCOUNT_SET(q->packet, ARCOUNT(q->packet) + 1);

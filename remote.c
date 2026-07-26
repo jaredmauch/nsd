@@ -1044,8 +1044,10 @@ print_zonestatus(RES* ssl, xfrd_state_type* xfrd, struct zone_options* zo)
 	}
 	if(zone_is_catalog_consumer(zo)) {
 		uint32_t serial = 0;
-		zone_type* zone = namedb_find_zone(xfrd->nsd->db,
-				(const dname_type*)zo->node.key);
+		zone_type* zone = xfrd->nsd->db
+			? namedb_find_zone(xfrd->nsd->db,
+				(const dname_type*)zo->node.key)
+			: NULL;
 		struct xfrd_catalog_consumer_zone* consumer_zone =
 			(struct xfrd_catalog_consumer_zone*)
 			rbtree_search( xfrd->catalog_consumer_zones
@@ -2407,6 +2409,7 @@ do_assoc_tsig(RES* ssl, xfrd_state_type* xfrd, char* arg)
 	char* arg2 = NULL;
 	struct zone_options* zone;
 	struct key_options* key_opt;
+	struct xfrd_zone* xzone;
 
 	if(*arg == '\0') {
 		(void)ssl_printf(ssl, "error: missing argument (zonename)\n");
@@ -2427,6 +2430,23 @@ do_assoc_tsig(RES* ssl, xfrd_state_type* xfrd, char* arg)
 	if(!key_opt) {
 		(void)ssl_printf(ssl, "error: key: %s does not exist\n", arg2);
 		return;
+	}
+
+	/* Abort any in-flight transfer for this zone before mutating its ACL
+	 * so that xfr->tsig stays consistent with zone->master->key_options. */
+	xzone = xfrd_find_zone(xfrd, (dname_type*)zone->node.key);
+	if(xzone && xzone->tcp_conn != -1) {
+		xfrd_tcp_release(xfrd->tcp_set, xzone);
+		/* probe the current target again, if possible. */
+		if(xzone->next_master == -1)
+			xzone->next_master = xzone->master_num;
+		xfrd_set_refresh_now(xzone);
+	} else if(xzone && xzone->zone_handler.ev_fd != -1) {
+		/* Also UDP can use the TSIG for signature. */
+		xfrd_udp_release(xzone);
+		if(xzone->next_master == -1)
+			xzone->next_master = xzone->master_num;
+		xfrd_set_refresh_now(xzone);
 	}
 
 	zopt_set_acl_to_tsig(zone->pattern->allow_notify, region, arg2,
@@ -2476,11 +2496,21 @@ do_del_tsig(RES* ssl, xfrd_state_type* xfrd, char* arg) {
 	}
 	RBTREE_FOR(zone, struct zone_options*, xfrd->nsd->options->zone_options)
 	{
+		xfrd_zone_type* xzone;
 		if(acl_contains_tsig_key(zone->pattern->allow_notify, arg) ||
 		   acl_contains_tsig_key(zone->pattern->notify, arg) ||
 		   acl_contains_tsig_key(zone->pattern->request_xfr, arg) ||
 		   acl_contains_tsig_key(zone->pattern->provide_xfr, arg) ||
 		   acl_contains_tsig_key(zone->pattern->allow_query, arg)) {
+			if(!ssl_printf(ssl, "zone %s uses key %s\n",
+				zone->name, arg))
+				return;
+			used_key = 1;
+			break;
+		}
+		xzone = xfrd_find_zone(xfrd, (dname_type*)zone->node.key);
+		if(xzone && xzone->latest_xfr &&
+			xzone->latest_xfr->tsig.key == key_opt->tsig_key) {
 			if(!ssl_printf(ssl, "zone %s uses key %s\n",
 				zone->name, arg))
 				return;
